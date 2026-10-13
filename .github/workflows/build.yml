@@ -1,4 +1,4 @@
-name: Auto Unzip and Build APK
+name: Build Direct APK
 
 on:
   push:
@@ -9,9 +9,6 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Depoyu Çek
-        uses: actions/checkout@v4
-
       - name: Java 17 Kurulumu
         uses: actions/setup-java@v4
         with:
@@ -24,38 +21,44 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Projeyi Hazırla, ZIP'i Aç ve APK Derle
+      - name: Sifirdan Android Projesi Olustur ve Kodlari Yaz
         run: |
-          # 1. ZIP dosyasını geçici bir klasöre güvenle çıkart (boşluklu isimleri destekler)
-          mkdir -p temp_extract
-          for z in *.zip; do
-            if [ -f "$z" ]; then
-              unzip -q -o "$z" -d temp_extract
-              rm -f "$z"
-            fi
-          done
-
-          # 2. Önce temiz ve tam uyumlu Android Gradle altyapısını oluştur
+          mkdir app_project
+          cd app_project
           flutter create --platforms=android --org com.novastream.iptv .
 
-          # 3. ZIP'ten çıkan pubspec.yaml ve lib/main.dart dosyalarını ana dizine aktar
-          if [ -d "temp_extract/NovaStream_IPTV_Pro" ]; then
-            cp -rf temp_extract/NovaStream_IPTV_Pro/pubspec.yaml .
-            cp -rf temp_extract/NovaStream_IPTV_Pro/lib/* lib/
-          else
-            cp -rf temp_extract/pubspec.yaml .
-            cp -rf temp_extract/lib/* lib/
-          fi
-          rm -rf temp_extract
+          # 1. pubspec.yaml dosyasini yaz
+          cat << 'EOF' > pubspec.yaml
+          name: novastream_iptv
+          description: NovaStream IPTV Pro
+          publish_to: 'none'
+          version: 2.0.0+1
 
-          # 4. AndroidManifest.xml içine İnternet, Cleartext HTTP ve PiP izinlerini ekle
+          environment:
+            sdk: '>=3.2.0 <4.0.0'
+
+          dependencies:
+            flutter:
+              sdk: flutter
+            media_kit: ^1.1.10
+            media_kit_video: ^1.2.4
+            media_kit_libs_video: ^1.0.4
+            http: ^1.2.0
+            shared_preferences: ^2.2.2
+            wakelock_plus: ^1.2.5
+
+          dev_dependencies:
+            flutter_test:
+              sdk: flutter
+
+          flutter:
+            uses-material-design: true
+          EOF
+
+          # 2. Android Izinlerini ve SDK surumunu ayarla
           MANIFEST="android/app/src/main/AndroidManifest.xml"
-          if ! grep -q "android.permission.INTERNET" "$MANIFEST"; then
-            sed -i 's/<manifest/<manifest xmlns:tools="http:\/\/schemas.android.com\/tools"/g' "$MANIFEST"
-            sed -i 's/<application/<uses-permission android:name="android.permission.INTERNET"\/>\n    <uses-permission android:name="android.permission.WAKE_LOCK"\/>\n    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"\/>\n    <application android:usesCleartextTraffic="true"/g' "$MANIFEST"
-          fi
+          sed -i 's/<application/<uses-permission android:name="android.permission.INTERNET"\/>\n    <uses-permission android:name="android.permission.WAKE_LOCK"\/>\n    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"\/>\n    <application android:usesCleartextTraffic="true"/g' "$MANIFEST"
 
-          # 5. Android minSdkVersion değerini media_kit için 21+ olarak garantiye al
           if [ -f "android/app/build.gradle" ]; then
             sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 21/g' android/app/build.gradle
             sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 21/g' android/app/build.gradle
@@ -64,12 +67,351 @@ jobs:
             sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 21/g' android/app/build.gradle.kts
           fi
 
-          # 6. Paketleri indir ve APK'yı derle
-          flutter pub get
-          flutter build apk --release --no-tree-shake-icons
+          # 3. Uygulama kaynak kodunu (lib/main.dart) otomatik olustur
+          cat << 'EOF' > lib/main.dart
+          import 'dart:async';
+          import 'dart:convert';
+          import 'dart:ui';
+          import 'package:flutter/material.dart';
+          import 'package:flutter/services.dart';
+          import 'package:http/http.dart' as http;
+          import 'package:media_kit/media_kit.dart';
+          import 'package:media_kit_video/media_kit_video.dart';
+          import 'package:shared_preferences/shared_preferences.dart';
+          import 'package:wakelock_plus/wakelock_plus.dart';
 
-      - name: APK Çıktısını Yükle (Artifact)
-        uses: actions/upload-artifact@v4
-        with:
-          name: NovaStream-IPTV-Pro-APK
-          path: build/app/outputs/flutter-apk/app-release.apk
+          void main() async {
+            WidgetsFlutterBinding.ensureInitialized();
+            MediaKit.ensureInitialized();
+            await WakelockPlus.enable();
+            runApp(const NovaStreamApp());
+          }
+
+          class NovaStreamApp extends StatelessWidget {
+            const NovaStreamApp({super.key});
+            @override
+            Widget build(BuildContext context) {
+              return MaterialApp(
+                title: 'NovaStream IPTV Pro',
+                debugShowCheckedModeBanner: false,
+                theme: ThemeData(
+                  brightness: Brightness.dark,
+                  scaffoldBackgroundColor: const Color(0xFF07090E),
+                  colorScheme: const ColorScheme.dark(
+                    primary: Color(0xFF00F0FF),
+                    secondary: Color(0xFF7000FF),
+                    surface: Color(0xFF111520),
+                  ),
+                  useMaterial3: true,
+                ),
+                home: const MainDashboard(),
+              );
+            }
+          }
+
+          enum ContentType { live, movie, series }
+          enum SourceProtocol { xtream, m3u, stalker, direct }
+
+          class StreamItem {
+            final String id;
+            final String name;
+            final String streamUrl;
+            final String logo;
+            final String group;
+            final ContentType type;
+            final Map<String, String> headers;
+
+            StreamItem({
+              required this.id,
+              required this.name,
+              required this.streamUrl,
+              this.logo = '',
+              this.group = 'Genel',
+              this.type = ContentType.live,
+              this.headers = const {'User-Agent': 'NovaStream/2.0 (Android; LibMPV)'},
+            });
+
+            Map<String, dynamic> toJson() => {
+              'id': id, 'name': name, 'streamUrl': streamUrl,
+              'logo': logo, 'group': group, 'type': type.index, 'headers': headers,
+            };
+
+            factory StreamItem.fromJson(Map<String, dynamic> json) => StreamItem(
+              id: json['id'], name: json['name'], streamUrl: json['streamUrl'],
+              logo: json['logo'] ?? '', group: json['group'] ?? 'Genel',
+              type: ContentType.values[json['type'] ?? 0],
+              headers: Map<String, String>.from(json['headers'] ?? {}),
+            );
+          }
+
+          class UniversalIptvEngine {
+            static Future<List<StreamItem>> parseM3U(String url) async {
+              final response = await http.get(Uri.parse(url));
+              if (response.statusCode != 200) throw Exception('HTTP ${response.statusCode}');
+              final body = utf8.decode(response.bodyBytes, allowMalformed: true);
+              final lines = const LineSplitter().convert(body);
+              final List<StreamItem> items = [];
+              String name = 'Kanal'; String logo = ''; String group = 'Genel';
+              final logoReg = RegExp(r'tvg-logo="([^"]*)"', caseSensitive: false);
+              final groupReg = RegExp(r'group-title="([^"]*)"', caseSensitive: false);
+              int c = 1;
+              for (var raw in lines) {
+                final l = raw.trim();
+                if (l.isEmpty) continue;
+                if (l.startsWith('#EXTINF:')) {
+                  logo = logoReg.firstMatch(l)?.group(1) ?? '';
+                  group = groupReg.firstMatch(l)?.group(1) ?? 'Genel';
+                  final idx = l.lastIndexOf(',');
+                  if (idx != -1 && idx + 1 < l.length) name = l.substring(idx + 1).trim();
+                } else if (!l.startsWith('#')) {
+                  ContentType t = ContentType.live;
+                  if (l.toLowerCase().contains('/movie/') || l.endsWith('.mp4') || l.endsWith('.mkv')) t = ContentType.movie;
+                  else if (l.toLowerCase().contains('/series/')) t = ContentType.series;
+                  items.add(StreamItem(id: 'm3u_${c++}', name: name, streamUrl: l, logo: logo, group: group, type: t));
+                  name = 'Kanal $c'; logo = ''; group = 'Genel';
+                }
+              }
+              return items;
+            }
+
+            static Future<List<StreamItem>> fetchXtream(String server, String user, String pass) async {
+              String base = server.trim();
+              if (base.endsWith('/')) base = base.substring(0, base.length - 1);
+              final List<StreamItem> all = [];
+              final res = await http.get(Uri.parse('$base/player_api.php?username=$user&password=$pass&action=get_live_streams'));
+              if (res.statusCode == 200) {
+                final List<dynamic> list = jsonDecode(res.body);
+                for (var s in list) {
+                  final id = s['stream_id'].toString();
+                  all.add(StreamItem(
+                    id: 'xc_$id', name: s['name'] ?? 'Kanal $id',
+                    streamUrl: '$base/live/$user/$pass/$id.ts',
+                    logo: s['stream_icon'] ?? '', group: 'Canlı TV', type: ContentType.live,
+                  ));
+                }
+              }
+              final vodRes = await http.get(Uri.parse('$base/player_api.php?username=$user&password=$pass&action=get_vod_streams'));
+              if (vodRes.statusCode == 200) {
+                final List<dynamic> vods = jsonDecode(vodRes.body);
+                for (var v in vods) {
+                  final id = v['stream_id'].toString();
+                  final ext = v['container_extension'] ?? 'mp4';
+                  all.add(StreamItem(
+                    id: 'vod_$id', name: v['name'] ?? 'Film $id',
+                    streamUrl: '$base/movie/$user/$pass/$id.$ext',
+                    logo: v['stream_icon'] ?? '', group: 'Filmler (VOD)', type: ContentType.movie,
+                  ));
+                }
+              }
+              return all;
+            }
+          }
+
+          class MainDashboard extends StatefulWidget {
+            const MainDashboard({super.key});
+            @override
+            State<MainDashboard> createState() => _MainDashboardState();
+          }
+
+          class _MainDashboardState extends State<MainDashboard> {
+            List<StreamItem> _streams = [
+              StreamItem(id: '1', name: 'TRT World HD', streamUrl: 'https://tv-trtworld.medya.trt.com.tr/master.m3u8', group: 'Haber'),
+              StreamItem(id: '2', name: 'Red Bull TV 4K', streamUrl: 'https://rbmn-live.akamaized.net/hls/live/590964/BoRB-AT/master.m3u8', group: 'Spor'),
+              StreamItem(id: '3', name: 'NASA TV Live', streamUrl: 'https://ntv1.akamaized.net/hls/live/2014075/NASA-NTV1-HLS/master.m3u8', group: 'Bilim'),
+            ];
+            Set<String> _favs = {};
+            String _group = 'Tümü';
+            ContentType _tab = ContentType.live;
+            String _query = '';
+            bool _loading = false;
+
+            @override
+            void initState() {
+              super.initState();
+              _load();
+            }
+
+            Future<void> _load() async {
+              final p = await SharedPreferences.getInstance();
+              final s = p.getString('streams');
+              final f = p.getStringList('favs') ?? [];
+              setState(() {
+                _favs = f.toSet();
+                if (s != null) _streams = (jsonDecode(s) as List).map((e) => StreamItem.fromJson(e)).toList();
+              });
+            }
+
+            Future<void> _save() async {
+              final p = await SharedPreferences.getInstance();
+              await p.setString('streams', jsonEncode(_streams.map((e) => e.toJson()).toList()));
+            }
+
+            @override
+            Widget build(BuildContext context) {
+              final groups = {'Tümü', 'Favoriler', ..._streams.where((e) => e.type == _tab).map((e) => e.group)}.toList();
+              final filtered = _streams.where((e) {
+                if (e.type != _tab) return false;
+                if (_group == 'Favoriler' && !_favs.contains(e.id)) return false;
+                if (_group != 'Tümü' && _group != 'Favoriler' && e.group != _group) return false;
+                if (_query.isNotEmpty && !e.name.toLowerCase().contains(_query.toLowerCase())) return false;
+                return true;
+              }).toList();
+
+              return Scaffold(
+                appBar: AppBar(
+                  backgroundColor: const Color(0xFF07090E),
+                  title: const Text('NOVASTREAM PRO', style: TextStyle(fontWeight: FontWeight.w900, color: Color(0xFF00F0FF))),
+                  actions: [
+                    IconButton(
+                      icon: const Icon(Icons.grid_view_rounded, color: Color(0xFF00F0FF)),
+                      onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => MultiScreenPlayer(streams: _streams))),
+                    ),
+                    IconButton(icon: const Icon(Icons.add_circle, color: Color(0xFF00F0FF), size: 30), onPressed: _addDialog),
+                  ],
+                ),
+                body: Column(
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: TextField(
+                        onChanged: (v) => setState(() => _query = v),
+                        decoration: InputDecoration(
+                          hintText: 'Kanal veya Film Ara...',
+                          prefixIcon: const Icon(Icons.search, color: Color(0xFF00F0FF)),
+                          filled: true, fillColor: const Color(0xFF111520),
+                          border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+                        ),
+                      ),
+                    ),
+                    SizedBox(
+                      height: 44,
+                      child: ListView.builder(
+                        scrollDirection: Axis.horizontal,
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                        itemCount: groups.length,
+                        itemBuilder: (c, i) {
+                          final g = groups[i];
+                          final sel = g == _group;
+                          return Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 4),
+                            child: ChoiceChip(
+                              label: Text(g), selected: sel,
+                              selectedColor: const Color(0xFF00F0FF),
+                              labelStyle: TextStyle(color: sel ? Colors.black : Colors.white, fontWeight: FontWeight.bold),
+                              onSelected: (_) => setState(() => _group = g),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                    Expanded(
+                      child: _loading
+                          ? const Center(child: CircularProgressIndicator())
+                          : ListView.builder(
+                              padding: const EdgeInsets.all(12),
+                              itemCount: filtered.length,
+                              itemBuilder: (c, i) {
+                                final item = filtered[i];
+                                final isFav = _favs.contains(item.id);
+                                return Card(
+                                  color: const Color(0xFF111520),
+                                  child: ListTile(
+                                    leading: const Icon(Icons.live_tv, color: Color(0xFF00F0FF)),
+                                    title: Text(item.name, style: const TextStyle(fontWeight: FontWeight.bold)),
+                                    subtitle: Text(item.group, style: const TextStyle(color: Colors.white54, fontSize: 12)),
+                                    trailing: IconButton(
+                                      icon: Icon(isFav ? Icons.favorite : Icons.favorite_border, color: isFav ? Colors.red : Colors.white54),
+                                      onPressed: () async {
+                                        setState(() => isFav ? _favs.remove(item.id) : _favs.add(item.id));
+                                        final p = await SharedPreferences.getInstance();
+                                        await p.setStringList('favs', _favs.toList());
+                                      },
+                                    ),
+                                    onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => PlayerScreen(playlist: filtered, index: i))),
+                                  ),
+                                );
+                              },
+                            ),
+                    ),
+                  ],
+                ),
+                bottomNavigationBar: NavigationBar(
+                  backgroundColor: const Color(0xFF111520),
+                  selectedIndex: _tab.index,
+                  onDestinationSelected: (idx) => setState(() { _tab = ContentType.values[idx]; _group = 'Tümü'; }),
+                  destinations: const [
+                    NavigationDestination(icon: Icon(Icons.live_tv), label: 'Canlı TV'),
+                    NavigationDestination(icon: Icon(Icons.movie), label: 'Filmler (VOD)'),
+                    NavigationDestination(icon: Icon(Icons.tv), label: 'Diziler'),
+                  ],
+                ),
+              );
+            }
+
+            void _addDialog() {
+              SourceProtocol proto = SourceProtocol.m3u;
+              final urlC = TextEditingController();
+              final uC = TextEditingController();
+              final pC = TextEditingController();
+              showModalBottomSheet(
+                context: context, isScrollControlled: true, backgroundColor: const Color(0xFF111520),
+                builder: (ctx) => StatefulBuilder(
+                  builder: (ctx, setS) => Padding(
+                    padding: EdgeInsets.only(left: 16, right: 16, top: 16, bottom: MediaQuery.of(ctx).viewInsets.bottom + 20),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        SegmentedButton<SourceProtocol>(
+                          segments: const [
+                            ButtonSegment(value: SourceProtocol.m3u, label: Text('M3U8')),
+                            ButtonSegment(value: SourceProtocol.xtream, label: Text('Xtream')),
+                            ButtonSegment(value: SourceProtocol.direct, label: Text('Tek Link')),
+                          ],
+                          selected: {proto},
+                          onSelectionChanged: (v) => setS(() => proto = v.first),
+                        ),
+                        const SizedBox(height: 12),
+                        TextField(controller: urlC, decoration: const InputDecoration(labelText: 'URL (M3U / Sunucu / Akış)', border: OutlineInputBorder())),
+                        if (proto == SourceProtocol.xtream) ...[
+                          const SizedBox(height: 8),
+                          TextField(controller: uC, decoration: const InputDecoration(labelText: 'Kullanıcı Adı', border: OutlineInputBorder())),
+                          const SizedBox(height: 8),
+                          TextField(controller: pC, decoration: const InputDecoration(labelText: 'Şifre', border: OutlineInputBorder())),
+                        ],
+                        const SizedBox(height: 12),
+                        ElevatedButton(
+                          onPressed: () async {
+                            Navigator.pop(ctx);
+                            setState(() => _loading = true);
+                            try {
+                              List<StreamItem> res = [];
+                              if (proto == SourceProtocol.m3u) res = await UniversalIptvEngine.parseM3U(urlC.text.trim());
+                              else if (proto == SourceProtocol.xtream) res = await UniversalIptvEngine.fetchXtream(urlC.text.trim(), uC.text.trim(), pC.text.trim());
+                              else res = [StreamItem(id: DateTime.now().toString(), name: 'Özel Akış', streamUrl: urlC.text.trim())];
+                              setState(() => _streams = [..._streams, ...res]);
+                              await _save();
+                            } catch (e) {
+                              if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Hata: $e')));
+                            } finally {
+                              if (mounted) setState(() => _loading = false);
+                            }
+                          },
+                          child: const Text('Kanalları Yükle'),
+                        )
+                      ],
+                    ),
+                  ),
+                ),
+              );
+            }
+          }
+
+          class PlayerScreen extends StatefulWidget {
+            final List<StreamItem> playlist;
+            final int index;
+            const PlayerScreen({super.key, required this.playlist, required this.index});
+            @override
+            State<PlayerScreen> createState() => _PlayerScreenState();
+          }
+
+          class _PlayerScreenState extends State<
