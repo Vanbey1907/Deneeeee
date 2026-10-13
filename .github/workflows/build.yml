@@ -5,10 +5,16 @@ on:
     branches: [ "main", "master" ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      - name: Depoyu Cek
+        uses: actions/checkout@v4
+
       - name: Java 17 Kurulumu
         uses: actions/setup-java@v4
         with:
@@ -21,13 +27,13 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Sifirdan Android Projesi Olustur ve Kodlari Yaz
+      - name: Projeyi Olustur
         run: |
-          mkdir app_project
-          cd app_project
-          flutter create --platforms=android --org com.novastream.iptv .
+          flutter create --platforms=android --org com.novastream.iptv app_project
 
-          # 1. pubspec.yaml dosyasini yaz
+      - name: pubspec.yaml Dosyasini Yaz
+        working-directory: app_project
+        run: |
           cat << 'EOF' > pubspec.yaml
           name: novastream_iptv
           description: NovaStream IPTV Pro
@@ -54,11 +60,13 @@ jobs:
           flutter:
             uses-material-design: true
           EOF
+          sed -i 's/^          //' pubspec.yaml
 
-          # 2. Android Izinlerini ve SDK surumunu ayarla
+      - name: Android Izinlerini ve SDK Ayarlarini Yap
+        working-directory: app_project
+        run: |
           MANIFEST="android/app/src/main/AndroidManifest.xml"
           sed -i 's/<application/<uses-permission android:name="android.permission.INTERNET"\/>\n    <uses-permission android:name="android.permission.WAKE_LOCK"\/>\n    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"\/>\n    <application android:usesCleartextTraffic="true"/g' "$MANIFEST"
-
           if [ -f "android/app/build.gradle" ]; then
             sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 21/g' android/app/build.gradle
             sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 21/g' android/app/build.gradle
@@ -67,13 +75,13 @@ jobs:
             sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 21/g' android/app/build.gradle.kts
           fi
 
-          # 3. Uygulama kaynak kodunu (lib/main.dart) otomatik olustur
+      - name: Uygulama Kodunu (main.dart) Yaz
+        working-directory: app_project
+        run: |
           cat << 'EOF' > lib/main.dart
           import 'dart:async';
           import 'dart:convert';
-          import 'dart:ui';
           import 'package:flutter/material.dart';
-          import 'package:flutter/services.dart';
           import 'package:http/http.dart' as http;
           import 'package:media_kit/media_kit.dart';
           import 'package:media_kit_video/media_kit_video.dart';
@@ -110,7 +118,7 @@ jobs:
           }
 
           enum ContentType { live, movie, series }
-          enum SourceProtocol { xtream, m3u, stalker, direct }
+          enum SourceProtocol { xtream, m3u, direct }
 
           class StreamItem {
             final String id;
@@ -414,4 +422,102 @@ jobs:
             State<PlayerScreen> createState() => _PlayerScreenState();
           }
 
-          class _PlayerScreenState extends State<
+          class _PlayerScreenState extends State<PlayerScreen> {
+            late final Player _player = Player();
+            late final VideoController _controller = VideoController(_player);
+            late int _idx = widget.index;
+
+            @override
+            void initState() {
+              super.initState();
+              _play();
+            }
+
+            void _play() => _player.open(Media(widget.playlist[_idx].streamUrl, httpHeaders: widget.playlist[_idx].headers));
+
+            @override
+            void dispose() {
+              _player.dispose();
+              super.dispose();
+            }
+
+            @override
+            Widget build(BuildContext context) {
+              return Scaffold(
+                backgroundColor: Colors.black,
+                appBar: AppBar(
+                  backgroundColor: Colors.black54,
+                  title: Text(widget.playlist[_idx].name),
+                  actions: [
+                    IconButton(icon: const Icon(Icons.skip_previous), onPressed: () { setState(() => _idx = (_idx - 1 + widget.playlist.length) % widget.playlist.length); _play(); }),
+                    IconButton(icon: const Icon(Icons.skip_next), onPressed: () { setState(() => _idx = (_idx + 1) % widget.playlist.length); _play(); }),
+                  ],
+                ),
+                body: Center(child: Video(controller: _controller)),
+              );
+            }
+          }
+
+          class MultiScreenPlayer extends StatefulWidget {
+            final List<StreamItem> streams;
+            const MultiScreenPlayer({super.key, required this.streams});
+            @override
+            State<MultiScreenPlayer> createState() => _MultiScreenPlayerState();
+          }
+
+          class _MultiScreenPlayerState extends State<MultiScreenPlayer> {
+            final List<Player> _players = List.generate(4, (_) => Player());
+            late final List<VideoController> _ctrls = _players.map((p) => VideoController(p)).toList();
+
+            @override
+            void initState() {
+              super.initState();
+              for (int i = 0; i < 4 && i < widget.streams.length; i++) {
+                _players[i].open(Media(widget.streams[i].streamUrl));
+                _players[i].setVolume(i == 0 ? 100 : 0);
+              }
+            }
+
+            @override
+            void dispose() {
+              for (var p in _players) { p.dispose(); }
+              super.dispose();
+            }
+
+            @override
+            Widget build(BuildContext context) {
+              return Scaffold(
+                appBar: AppBar(title: const Text('4\'lü Çoklu Ekran')),
+                body: GridView.builder(
+                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: 2, childAspectRatio: 16 / 10),
+                  itemCount: 4,
+                  itemBuilder: (c, i) => Container(
+                    margin: const EdgeInsets.all(4),
+                    color: Colors.black,
+                    child: Video(controller: _ctrls[i], controls: NoVideoControls),
+                  ),
+                ),
+              );
+            }
+          }
+          EOF
+          sed -i 's/^          //' lib/main.dart
+
+      - name: Bagimliliklari Indir ve Release APK Derle
+        working-directory: app_project
+        run: |
+          flutter pub get
+          flutter build apk --release --no-tree-shake-icons
+
+      - name: APK Dosyasini Artifacts Olarak Yukle
+        uses: actions/upload-artifact@v4
+        with:
+          name: NovaStream-IPTV-Pro-APK
+          path: app_project/build/app/outputs/flutter-apk/app-release.apk
+
+      - name: Dogrudan Indirilebilir APK Yayinla (Releases)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v2.0.${{ github.run_number }}
+          name: "NovaStream IPTV Pro APK v2.0.${{ github.run_number }}"
+          files: app_project/build/app/outputs/flutter-apk/app-release.apk
