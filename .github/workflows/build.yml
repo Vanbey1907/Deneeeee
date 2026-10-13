@@ -1,0 +1,51 @@
+name: Auto Unzip and Build APK
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Depoyu Çek
+        uses: actions/checkout@v4
+
+      - name: ZIP Dosyasını Otomatik Aç
+        run: |
+          unzip -o "*.zip"
+          rm -f *.zip
+
+      - name: Java 17 Kurulumu
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Flutter SDK Kurulumu
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Android Altyapısını Tamamla ve APK Derle
+        run: |
+          if [ -d "NovaStream_IPTV_Pro" ]; then
+            cp -r NovaStream_IPTV_Pro/* .
+            cp -r NovaStream_IPTV_Pro/.* . 2>/dev/null || true
+          fi
+          flutter create --platforms=android --org com.novastream.iptv .
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+          if ! grep -q "android.permission.INTERNET" "$MANIFEST"; then
+            sed -i 's/<application/<uses-permission android:name="android.permission.INTERNET"\/>\n    <uses-permission android:name="android.permission.WAKE_LOCK"\/>\n    <application android:usesCleartextTraffic="true"/g' "$MANIFEST"
+          fi
+          flutter pub get
+          flutter build apk --release --no-tree-shake-icons
+
+      - name: APK Çıktısını Yükle
+        uses: actions/upload-artifact@v4
+        with:
+          name: NovaStream-IPTV-Pro-APK
+          path: build/app/outputs/flutter-apk/app-release.apk
+          
