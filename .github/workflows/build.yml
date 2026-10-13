@@ -12,11 +12,6 @@ jobs:
       - name: Depoyu Çek
         uses: actions/checkout@v4
 
-      - name: ZIP Dosyasını Otomatik Aç
-        run: |
-          unzip -o "*.zip"
-          rm -f *.zip
-
       - name: Java 17 Kurulumu
         uses: actions/setup-java@v4
         with:
@@ -29,23 +24,52 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Android Altyapısını Tamamla ve APK Derle
+      - name: Projeyi Hazırla, ZIP'i Aç ve APK Derle
         run: |
-          if [ -d "NovaStream_IPTV_Pro" ]; then
-            cp -r NovaStream_IPTV_Pro/* .
-            cp -r NovaStream_IPTV_Pro/.* . 2>/dev/null || true
-          fi
+          # 1. ZIP dosyasını geçici bir klasöre güvenle çıkart (boşluklu isimleri destekler)
+          mkdir -p temp_extract
+          for z in *.zip; do
+            if [ -f "$z" ]; then
+              unzip -q -o "$z" -d temp_extract
+              rm -f "$z"
+            fi
+          done
+
+          # 2. Önce temiz ve tam uyumlu Android Gradle altyapısını oluştur
           flutter create --platforms=android --org com.novastream.iptv .
+
+          # 3. ZIP'ten çıkan pubspec.yaml ve lib/main.dart dosyalarını ana dizine aktar
+          if [ -d "temp_extract/NovaStream_IPTV_Pro" ]; then
+            cp -rf temp_extract/NovaStream_IPTV_Pro/pubspec.yaml .
+            cp -rf temp_extract/NovaStream_IPTV_Pro/lib/* lib/
+          else
+            cp -rf temp_extract/pubspec.yaml .
+            cp -rf temp_extract/lib/* lib/
+          fi
+          rm -rf temp_extract
+
+          # 4. AndroidManifest.xml içine İnternet, Cleartext HTTP ve PiP izinlerini ekle
           MANIFEST="android/app/src/main/AndroidManifest.xml"
           if ! grep -q "android.permission.INTERNET" "$MANIFEST"; then
-            sed -i 's/<application/<uses-permission android:name="android.permission.INTERNET"\/>\n    <uses-permission android:name="android.permission.WAKE_LOCK"\/>\n    <application android:usesCleartextTraffic="true"/g' "$MANIFEST"
+            sed -i 's/<manifest/<manifest xmlns:tools="http:\/\/schemas.android.com\/tools"/g' "$MANIFEST"
+            sed -i 's/<application/<uses-permission android:name="android.permission.INTERNET"\/>\n    <uses-permission android:name="android.permission.WAKE_LOCK"\/>\n    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"\/>\n    <application android:usesCleartextTraffic="true"/g' "$MANIFEST"
           fi
+
+          # 5. Android minSdkVersion değerini media_kit için 21+ olarak garantiye al
+          if [ -f "android/app/build.gradle" ]; then
+            sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 21/g' android/app/build.gradle
+            sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 21/g' android/app/build.gradle
+          fi
+          if [ -f "android/app/build.gradle.kts" ]; then
+            sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 21/g' android/app/build.gradle.kts
+          fi
+
+          # 6. Paketleri indir ve APK'yı derle
           flutter pub get
           flutter build apk --release --no-tree-shake-icons
 
-      - name: APK Çıktısını Yükle
+      - name: APK Çıktısını Yükle (Artifact)
         uses: actions/upload-artifact@v4
         with:
           name: NovaStream-IPTV-Pro-APK
           path: build/app/outputs/flutter-apk/app-release.apk
-          
